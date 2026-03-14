@@ -59,7 +59,7 @@ jobs:
           username: resend
           password: ${{ secrets.RESEND_API_KEY }}
           subject: "✅ S5 on time – Höhenkirchen-Siegertsbrunn"
-          to: der.baumann@t-online.de
+          to: mofriba@gmail.com
           from: "S5 Monitor <onboarding@resend.dev>"
           body: |
             ✅ The S5 from Höhenkirchen-Siegertsbrunn is running on time, no cancellations.
