@@ -97,12 +97,28 @@ async def run() -> int:
 
         print(f"{planned_str:>5}  {realtime_str:>5}  {delay_min:>+5}m  {destination:<28}  {status}")
 
-    print()
-    if max_delay >= 5:
-        print(f"⚠️  Max delay on {TARGET_LINE}: {max_delay} min")
-    else:
-        print(f"✅  {TARGET_LINE} running on time (max delay: {max_delay} min)")
+    cancelled_count = sum(1 for d in relevant if d.get("cancelled", False))
 
+    print()
+    failed = False
+
+    if max_delay >= 5:
+        print(f"⚠️  FAIL: Max delay on {TARGET_LINE} is {max_delay} min (threshold: 5 min)")
+        failed = True
+    else:
+        print(f"✅  Max delay on {TARGET_LINE}: {max_delay} min — OK")
+
+    if cancelled_count:
+        print(f"🚫  FAIL: {cancelled_count} departure(s) cancelled")
+        failed = True
+    else:
+        print(f"✅  No cancellations — OK")
+
+    if failed:
+        print("\n❌  Check FAILED — S5 is disrupted.")
+        return 1
+
+    print("\n✅  Check PASSED — S5 is running normally.")
     return 0
 
 
