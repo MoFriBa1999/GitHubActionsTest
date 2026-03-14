@@ -1,0 +1,34 @@
+name: S5 Delay Check – Höhenkirchen → Marienplatz
+
+on:
+
+  schedule:
+    # Run every 15 minutes between 06:00 and 21:00 Munich time (= 05:00–20:00 UTC)
+    - cron: "*/15 5-20 * * 1-5"   # weekdays only
+    - cron: "*/15 5-20 * * 6,0"   # weekends too (remove this line if not needed)
+  workflow_dispatch:               # allow manual trigger from Actions tab
+  push:
+  
+jobs:
+  check-sbahn:
+    name: Check S5 delay
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install mvg aiohttp tzdata
+
+      - name: Run S5 delay check
+        id: delay_check
+        # Script exits with code 1 on delay ≥ 5 min or cancellation → job fails
+        run: python mvg_check.py
+
