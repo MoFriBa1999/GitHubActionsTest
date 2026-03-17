@@ -2,7 +2,7 @@ name: S5 Delay Check – Höhenkirchen → Marienplatz
 
 on:
   schedule:
-    - cron: "0,15,30,45 15-17 * * 1-5"
+    - cron: "0,15,30,45 13-17 * * 1-5"
     - cron: "0 18 * * 1-5"
   workflow_dispatch:               # allow manual trigger from Actions tab
   push:                            # run on every push to the repository
@@ -40,7 +40,7 @@ jobs:
           username: resend
           password: ${{ secrets.RESEND_API_KEY }}
           subject: "🚨 S5 disrupted – Höhenkirchen-Siegertsbrunn"
-          to: der.baumann@t-online.de
+          to: mofriba@gmail.com
           from: "S5 Monitor <onboarding@resend.dev>"
           body: |
             ⚠️ The S5 from Höhenkirchen-Siegertsbrunn has a delay of 5+ minutes or a cancellation.
