@@ -1,0 +1,238 @@
+
+name: DB Connection Check – München → Aachen
+
+on:
+  schedule:
+    # Once daily at 07:17 UTC = 08:17 German winter time
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-connections:
+    name: Check DB connections
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      # ==========================================
+      # CONFIGURATION
+      # ==========================================
+      FROM_STATION: "München Hbf"
+      TO_STATION: "Aachen Hbf"
+      TRAVEL_DATE: "2026-12-18"
+
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check DB connections
+        id: check
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const API = "https://v6.db.transport.rest";
+          const fromName = process.env.FROM_STATION;
+          const toName = process.env.TO_STATION;
+          const date = process.env.TRAVEL_DATE;
+
+          function setOutput(key, value) {
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `${key}=${value}\n`
+            );
+          }
+
+          async function getJson(url) {
+            const response = await fetch(url, {
+              headers: {
+                "user-agent": "GitHubActions-DB-Connection-Check/1.0"
+              },
+              signal: AbortSignal.timeout(20000)
+            });
+
+            if (!response.ok) {
+              throw new Error(`API HTTP ${response.status}`);
+            }
+
+            return response.json();
+          }
+
+          async function findStation(name) {
+            const url = new URL(`${API}/locations`);
+            url.searchParams.set("query", name);
+            url.searchParams.set("results", "10");
+            url.searchParams.set("addresses", "false");
+            url.searchParams.set("poi", "false");
+
+            const locations = await getJson(url);
+            const stations = locations.filter(
+              s => s.type === "station" && s.id
+            );
+
+            const station = stations.find(
+              s => s.name?.toLowerCase() === name.toLowerCase()
+            ) || stations[0];
+
+            if (!station) {
+              throw new Error(`Station not found: ${name}`);
+            }
+
+            return station;
+          }
+
+          async function main() {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+              throw new Error("Invalid date. Use YYYY-MM-DD.");
+            }
+
+            const from = await findStation(fromName);
+            const to = await findStation(toName);
+
+            const found = new Map();
+            const errors = [];
+            let successfulQueries = 0;
+
+            // Search at several times to cover the travel day.
+            for (const hour of [0, 3, 6, 9, 12, 15, 18, 21]) {
+              const localTime =
+                `${date}T${String(hour).padStart(2, "0")}:00:00`;
+
+              const probe = new Date(`${date}T12:00:00Z`);
+              const parts = new Intl.DateTimeFormat("en-GB", {
+                timeZone: "Europe/Berlin",
+                timeZoneName: "longOffset"
+              }).formatToParts(probe);
+
+              const offset = (
+                parts.find(p => p.type === "timeZoneName")?.value
+                || "GMT+01:00"
+              ).replace("GMT", "") || "+00:00";
+
+              const url = new URL(`${API}/journeys`);
+              url.searchParams.set("from", from.id);
+              url.searchParams.set("to", to.id);
+              url.searchParams.set("departure", `${localTime}${offset}`);
+              url.searchParams.set("results", "15");
+              url.searchParams.set("language", "de");
+
+              try {
+                const data = await getJson(url);
+
+                if (!Array.isArray(data.journeys)) {
+                  throw new Error("Unexpected API response");
+                }
+
+                successfulQueries++;
+
+                for (const journey of data.journeys) {
+                  const legs = (journey.legs || []).filter(
+                    leg => leg.departure && leg.arrival
+                  );
+
+                  if (!legs.length) continue;
+                  if (!legs[0].departure.startsWith(date)) continue;
+
+                  const first = legs[0];
+                  const last = legs[legs.length - 1];
+
+                  found.set(
+                    `${first.departure}|${last.arrival}`,
+                    {
+                      departure: first.departure,
+                      arrival: last.arrival
+                    }
+                  );
+                }
+              } catch (error) {
+                errors.push(`${hour}:00 - ${error.message}`);
+              }
+
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+
+            if (successfulQueries === 0) {
+              throw new Error(
+                `All journey searches failed: ${errors.join("; ")}`
+              );
+            }
+
+            if (found.size === 0) {
+              console.log(
+                `NO CONNECTION FOUND: ${fromName} -> ${toName} on ${date}`
+              );
+              setOutput("found", "false");
+              setOutput("count", "0");
+              return;
+            }
+
+            const connections = [...found.values()].sort(
+              (a, b) => a.departure.localeCompare(b.departure)
+            );
+
+            const details = connections.map(c =>
+              `${c.departure} -> ${c.arrival}`
+            ).join("\n");
+
+            console.log(`FOUND ${connections.length} CONNECTION(S)`);
+            console.log(details);
+
+            fs.appendFileSync(
+              process.env.GITHUB_STEP_SUMMARY,
+              `# DB Connection Check\n\n` +
+              `**Result: YES**\n\n` +
+              `Route: ${fromName} -> ${toName}\n\n` +
+              `Date: ${date}\n\n` +
+              `Connections found: ${connections.length}\n\n` +
+              connections.map(c =>
+                `- ${c.departure} -> ${c.arrival}`
+              ).join("\n") + "\n"
+            );
+
+            setOutput("found", "true");
+            setOutput("count", String(connections.length));
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `details<<CONNECTIONS_END\n${details}\nCONNECTIONS_END\n`
+            );
+          }
+
+          main().catch(error => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Send email when connections are found
+        if: success() && steps.check.outputs.found == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.resend.com
+          server_port: 465
+          secure: true
+          username: resend
+          password: ${{ secrets.RESEND_API_KEY }}
+          subject: "🚆 DB connections found – München → Aachen – ${{ env.TRAVEL_DATE }}"
+          to: der.baumann@t-online.de
+          from: "DB Monitor <onboarding@resend.dev>"
+          body: |
+            Good news! Connections were found.
+
+            Route: ${{ env.FROM_STATION }} -> ${{ env.TO_STATION }}
+            Travel date: ${{ env.TRAVEL_DATE }}
+            Number of connections: ${{ steps.check.outputs.count }}
+
+            Connections:
+            ${{ steps.check.outputs.details }}
+
+            Check the connection search on:
+            https://www.bahn.de/
+
+            Workflow run:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
