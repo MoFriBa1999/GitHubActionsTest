@@ -14,14 +14,16 @@ jobs:
   check-connections:
     name: Check DB connections
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     env:
       # ==========================================
-      # CONFIGURATION
+      # CONFIGURATION: Change your trip here
       # ==========================================
       FROM_STATION: "München Hbf"
+      FROM_ID: "8000261"
       TO_STATION: "Aachen Hbf"
+      TO_ID: "8000001"
       TRAVEL_DATE: "2026-12-18"
 
     steps:
@@ -40,6 +42,8 @@ jobs:
           const API = "https://v6.db.transport.rest";
           const fromName = process.env.FROM_STATION;
           const toName = process.env.TO_STATION;
+          const fromId = process.env.FROM_ID;
+          const toId = process.env.TO_ID;
           const date = process.env.TRAVEL_DATE;
 
           function setOutput(key, value) {
@@ -49,76 +53,114 @@ jobs:
             );
           }
 
-          async function getJson(url) {
-            const response = await fetch(url, {
-              headers: {
-                "user-agent": "GitHubActions-DB-Connection-Check/1.0"
-              },
-              signal: AbortSignal.timeout(20000)
-            });
-
-            if (!response.ok) {
-              throw new Error(`API HTTP ${response.status}`);
-            }
-
-            return response.json();
+          function setMultilineOutput(key, value) {
+            const delimiter = `END_${key}_VALUE`;
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `${key}<<${delimiter}\n${value}\n${delimiter}\n`
+            );
           }
 
-          async function findStation(name) {
-            const url = new URL(`${API}/locations`);
-            url.searchParams.set("query", name);
-            url.searchParams.set("results", "10");
-            url.searchParams.set("addresses", "false");
-            url.searchParams.set("poi", "false");
+          function validDate(value) {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+            const d = new Date(`${value}T12:00:00Z`);
+            return d.toISOString().slice(0, 10) === value;
+          }
 
-            const locations = await getJson(url);
-            const stations = locations.filter(
-              s => s.type === "station" && s.id
+          function berlinOffset(date, hour) {
+            const utcGuess = new Date(
+              `${date}T${String(hour).padStart(2, "0")}:00:00Z`
             );
 
-            const station = stations.find(
-              s => s.name?.toLowerCase() === name.toLowerCase()
-            ) || stations[0];
+            const parts = new Intl.DateTimeFormat("en-GB", {
+              timeZone: "Europe/Berlin",
+              timeZoneName: "longOffset"
+            }).formatToParts(utcGuess);
 
-            if (!station) {
-              throw new Error(`Station not found: ${name}`);
+            return (
+              parts.find(p => p.type === "timeZoneName")?.value
+                || "GMT+01:00"
+            ).replace("GMT", "") || "+00:00";
+          }
+
+          async function getJson(url) {
+            const maxAttempts = 4;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              try {
+                const response = await fetch(url, {
+                  headers: {
+                    "user-agent": "GitHubActions-DB-Connection-Check/1.0",
+                    "accept": "application/json"
+                  },
+                  signal: AbortSignal.timeout(20000)
+                });
+
+                if (!response.ok) {
+                  const retryable =
+                    response.status === 429 || response.status >= 500;
+
+                  if (!retryable || attempt === maxAttempts) {
+                    throw new Error(`API HTTP ${response.status}`);
+                  }
+
+                  const retryAfter = Number(
+                    response.headers.get("retry-after")
+                  );
+
+                  const waitMs = Number.isFinite(retryAfter) &&
+                    retryAfter > 0
+                    ? Math.min(retryAfter * 1000, 30000)
+                    : attempt * 3000;
+
+                  console.log(
+                    `HTTP ${response.status}; retry ${attempt + 1}/` +
+                    `${maxAttempts} in ${waitMs} ms`
+                  );
+
+                  await new Promise(r => setTimeout(r, waitMs));
+                  continue;
+                }
+
+                return await response.json();
+
+              } catch (error) {
+                if (attempt === maxAttempts) throw error;
+
+                const waitMs = attempt * 3000;
+
+                console.log(
+                  `Request failed: ${error.message}; retry ` +
+                  `${attempt + 1}/${maxAttempts} in ${waitMs} ms`
+                );
+
+                await new Promise(r => setTimeout(r, waitMs));
+              }
             }
 
-            return station;
+            throw new Error("Request failed after all retries");
           }
 
           async function main() {
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-              throw new Error("Invalid date. Use YYYY-MM-DD.");
+            if (!validDate(date)) {
+              throw new Error(`Invalid travel date: ${date}`);
             }
-
-            const from = await findStation(fromName);
-            const to = await findStation(toName);
 
             const found = new Map();
             const errors = [];
             let successfulQueries = 0;
 
-            // Search at several times to cover the travel day.
+            // Eight departure times to sample the whole day.
             for (const hour of [0, 3, 6, 9, 12, 15, 18, 21]) {
               const localTime =
                 `${date}T${String(hour).padStart(2, "0")}:00:00`;
-
-              const probe = new Date(`${date}T12:00:00Z`);
-              const parts = new Intl.DateTimeFormat("en-GB", {
-                timeZone: "Europe/Berlin",
-                timeZoneName: "longOffset"
-              }).formatToParts(probe);
-
-              const offset = (
-                parts.find(p => p.type === "timeZoneName")?.value
-                || "GMT+01:00"
-              ).replace("GMT", "") || "+00:00";
+              const departure =
+                `${localTime}${berlinOffset(date, hour)}`;
 
               const url = new URL(`${API}/journeys`);
-              url.searchParams.set("from", from.id);
-              url.searchParams.set("to", to.id);
-              url.searchParams.set("departure", `${localTime}${offset}`);
+              url.searchParams.set("from", fromId);
+              url.searchParams.set("to", toId);
+              url.searchParams.set("departure", departure);
               url.searchParams.set("results", "15");
               url.searchParams.set("language", "de");
 
@@ -136,39 +178,62 @@ jobs:
                     leg => leg.departure && leg.arrival
                   );
 
-                  if (!legs.length) continue;
+                  if (legs.length === 0) continue;
                   if (!legs[0].departure.startsWith(date)) continue;
 
                   const first = legs[0];
                   const last = legs[legs.length - 1];
 
-                  found.set(
-                    `${first.departure}|${last.arrival}`,
-                    {
-                      departure: first.departure,
-                      arrival: last.arrival
-                    }
-                  );
+                  const key = `${first.departure}|${last.arrival}`;
+
+                  found.set(key, {
+                    departure: first.departure,
+                    arrival: last.arrival
+                  });
                 }
+
               } catch (error) {
                 errors.push(`${hour}:00 - ${error.message}`);
               }
 
-              await new Promise(resolve => setTimeout(resolve, 1000));
+              // Keep requests spaced out.
+              await new Promise(r => setTimeout(r, 1500));
             }
 
+            // No result is trustworthy if every request failed.
             if (successfulQueries === 0) {
               throw new Error(
-                `All journey searches failed: ${errors.join("; ")}`
+                "All journey searches failed:\n" + errors.join("\n")
+              );
+            }
+
+            // If there were errors and no journeys, don't incorrectly
+            // report that no connections exist.
+            if (found.size === 0 && errors.length > 0) {
+              throw new Error(
+                "Check incomplete; some API queries failed and no " +
+                "connections were found in the remaining queries:\n" +
+                errors.join("\n")
               );
             }
 
             if (found.size === 0) {
               console.log(
-                `NO CONNECTION FOUND: ${fromName} -> ${toName} on ${date}`
+                `NO CONNECTIONS FOUND: ${fromName} -> ${toName} on ${date}`
               );
+
               setOutput("found", "false");
               setOutput("count", "0");
+
+              fs.appendFileSync(
+                process.env.GITHUB_STEP_SUMMARY,
+                `# DB Connection Check\n\n` +
+                `**Result: NO**\n\n` +
+                `Route: ${fromName} -> ${toName}\n\n` +
+                `Date: ${date}\n\n` +
+                `No connections found in ${successfulQueries} successful searches.\n`
+              );
+
               return;
             }
 
@@ -180,8 +245,15 @@ jobs:
               `${c.departure} -> ${c.arrival}`
             ).join("\n");
 
-            console.log(`FOUND ${connections.length} CONNECTION(S)`);
+            console.log(`YES: Found ${connections.length} connection(s).`);
             console.log(details);
+
+            if (errors.length > 0) {
+              console.warn(
+                "Some searches failed, but connections were found:",
+                errors
+              );
+            }
 
             fs.appendFileSync(
               process.env.GITHUB_STEP_SUMMARY,
@@ -197,15 +269,12 @@ jobs:
 
             setOutput("found", "true");
             setOutput("count", String(connections.length));
-            fs.appendFileSync(
-              process.env.GITHUB_OUTPUT,
-              `details<<CONNECTIONS_END\n${details}\nCONNECTIONS_END\n`
-            );
+            setMultilineOutput("details", details);
           }
 
           main().catch(error => {
             console.error(error);
-            process.exit(1);
+            process.exitCode = 1;
           });
           NODE
 
@@ -231,7 +300,7 @@ jobs:
             Connections:
             ${{ steps.check.outputs.details }}
 
-            Check the connection search on:
+            Check the journey search:
             https://www.bahn.de/
 
             Workflow run:
